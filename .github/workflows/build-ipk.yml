@@ -36,16 +36,11 @@ jobs:
           # 1. 准备 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-          # 3. 配置 Git 允许无密码/公开匿名克隆，然后拉取 Passwall 源码
-          git config --global url."https://github.com/".insteadOf git://github.com/
-          git config --global http.lowSpeedLimit 1000
-          git config --global http.lowSpeedTime 60
-
+          
+          # 2. 使用稳定加速镜像克隆 Passwall 源码，彻底避开 HTTPS 鉴权限制
           mkdir -p package/passwall
-          # 加上环境变量 GIT_TERMINAL_PROMPT=0，强制 Git 在遇到鉴权时直接报错放弃而不是弹窗等待输入用户名
-          GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall.git package/passwall/luci
-          GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall-packages.git package/passwall/packages
+          git clone --depth=1 https://mirror.ghproxy.com/https://github.com/xiaorouji/openwrt-passwall.git package/passwall/luci
+          git clone --depth=1 https://mirror.ghproxy.com/https://github.com/xiaorouji/openwrt-passwall-packages.git package/passwall/packages
 
           # 3. 启用 Passwall 配置
           echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
