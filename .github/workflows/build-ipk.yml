@@ -36,6 +36,7 @@ jobs:
           ./scripts/feeds install -a
 
           # 2. 拉取 Passwall 源码及其依赖
+          git config --global url."https://github.com/".insteadOf git://github.com/
           mkdir -p package/passwall
           git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall.git package/passwall/luci
           git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall-packages.git package/passwall/packages
