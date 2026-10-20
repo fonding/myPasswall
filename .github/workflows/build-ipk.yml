@@ -37,10 +37,10 @@ jobs:
           # 1. 准备 feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          
+
           # 2. 下载 Passwall 及其依赖包
           mkdir -p package/passwall/luci package/passwall/packages
-          
+
           wget -q https://github.com/Openwrt-Passwall/openwrt-passwall/archive/refs/heads/main.zip -O luci.zip
           unzip -q luci.zip
           cp -rf openwrt-passwall-main/* package/passwall/luci/
@@ -51,20 +51,25 @@ jobs:
           cp -rf openwrt-passwall-packages-main/* package/passwall/packages/
           rm -rf packages.zip openwrt-passwall-packages-main
 
-          # 3. 关键步骤：物理删除依赖 Rust 的源码目录，阻断 SDK 扫描 Rust 工具链
+          # 3. 彻底清除 feeds 和 package 里的 shadowsocks-rust 与 tuic 目录（保留 lang/rust 结构）
+          rm -rf feeds/packages/net/shadowsocks-rust
+          rm -rf feeds/packages/net/tuic-client
           rm -rf package/passwall/packages/shadowsocks-rust
           rm -rf package/passwall/packages/tuic-client
-          rm -rf feeds/packages/lang/rust
 
-          # 4. 启用 Passwall 配置
+          # 4. 显式禁用 Rust 相关子组件
           echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-passwall_include_sing_box=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-passwall_include_xray=y" >> .config
           echo "CONFIG_PACKAGE_chinadns-ng=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust=n" >> .config
+          echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Tuic=n" >> .config
+          echo "CONFIG_PACKAGE_shadowsocks-rust=n" >> .config
+          echo "CONFIG_PACKAGE_tuic-client=n" >> .config
 
           make defconfig
 
-          # 5. 开始编译
+          # 5. 开始单独编译 passwall
           make package/luci-app-passwall/compile V=99
 
       - name: Organize IPK Files
