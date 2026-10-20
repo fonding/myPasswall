@@ -37,10 +37,20 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          # 2. 使用稳定加速镜像克隆 Passwall 源码，彻底避开 HTTPS 鉴权限制
-          mkdir -p package/passwall
-          git clone --depth=1 https://mirror.ghproxy.com/https://github.com/xiaorouji/openwrt-passwall.git package/passwall/luci
-          git clone --depth=1 https://mirror.ghproxy.com/https://github.com/xiaorouji/openwrt-passwall-packages.git package/passwall/packages
+          # 3. 使用新组织地址直接下载 Passwall 及其依赖的 ZIP 源码包（彻底免 Git 认证）
+          mkdir -p package/passwall/luci package/passwall/packages
+          
+          # 下载并解压主程序
+          wget -q https://github.com/Openwrt-Passwall/openwrt-passwall/archive/refs/heads/main.zip -O luci.zip
+          unzip -q luci.zip
+          cp -rf openwrt-passwall-main/* package/passwall/luci/
+          rm -rf luci.zip openwrt-passwall-main
+
+          # 下载并解压核心依赖组件包
+          wget -q https://github.com/Openwrt-Passwall/openwrt-passwall-packages/archive/refs/heads/main.zip -O packages.zip
+          unzip -q packages.zip
+          cp -rf openwrt-passwall-packages-main/* package/passwall/packages/
+          rm -rf packages.zip openwrt-passwall-packages-main
 
           # 3. 启用 Passwall 配置
           echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
