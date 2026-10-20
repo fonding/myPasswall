@@ -1,0 +1,61 @@
+name: Build Passwall IPK
+
+on:
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build:
+  # N60 Pro 是 aarch64 架构，建议在 ubuntu 22.04 环境下编译
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialization Environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev patch python3 python3-pip rsync subversion unzip zlib1g-dev libelf-dev swig flex bison cmake g++ wget
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+      - name: Download and Extract SDK
+        run: |
+          # 注意：这里以 ImmortalWrt 24.10 的 aarch64 SDK 为例（如果官方有对应的 snapshot SDK 链接可替换）
+          # 也可以替换为你当前固件源码配套的 SDK 压缩包直链
+          SDK_URL="https://downloads.immortalwrt.org/snapshots/targets/mediatek/filogic/immortalwrt-sdk-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.xz"
+          wget -q $SDK_URL -O sdk.tar.xz
+          tar -xf sdk.tar.xz
+          mv immortalwrt-sdk-* sdk
+          cd sdk
+
+          # 1. 准备 feeds
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          # 2. 拉取 Passwall 源码及其依赖
+          mkdir -p package/passwall
+          git clone https://github.com/xiaorouji/openwrt-passwall.git package/passwall/luci
+          git clone https://github.com/xiaorouji/openwrt-passwall-packages.git package/passwall/packages
+
+          # 3. 启用 Passwall 配置
+          echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-passwall_include_sing_box=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-passwall_include_xray=y" >> .config
+          make defconfig
+
+          # 4. 开始单独编译 passwall
+          make package/luci-app-passwall/compile V=99
+
+      - name: Organize IPK Files
+        run: |
+          mkdir -p compiled_ipks
+          # 将编译好的 ipk 收集到指定目录
+          find sdk/bin/packages/ -name "*.ipk" -exec cp {} compiled_ipks/ \;
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: passwall-ipks
+          path: compiled_ipks/*.ipk
