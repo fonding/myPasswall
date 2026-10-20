@@ -21,14 +21,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev patch python3 python3-pip rsync subversion unzip zlib1g-dev libelf-dev swig flex bison cmake g++ wget
           sudo timedatectl set-timezone "Asia/Shanghai"
-
+          
       - name: Download and Extract SDK
         run: |
           # 注意：这里以 ImmortalWrt 24.10 的 aarch64 SDK 为例（如果官方有对应的 snapshot SDK 链接可替换）
           # 也可以替换为你当前固件源码配套的 SDK 压缩包直链
           # SDK_URL="https://downloads.immortalwrt.org/snapshots/targets/mediatek/filogic/immortalwrt-sdk-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.xz"
-          # SDK_URL="https://downloads.immortalwrt.org/releases/24.10-SNAPSHOT/targets/mediatek/filogic/immortalwrt-sdk-24.10-SNAPSHOT-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/mediatek/filogic/immortalwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          SDK_URL="https://downloads.immortalwrt.org/releases/24.10-SNAPSHOT/targets/mediatek/filogic/immortalwrt-sdk-24.10-SNAPSHOT-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          # SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/mediatek/filogic/immortalwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           wget -q $SDK_URL -O sdk.tar.zst
           tar -xf sdk.tar.zst
           mv immortalwrt-sdk-* sdk
@@ -38,36 +38,33 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          # 3. 使用新组织地址直接下载 Passwall 及其依赖的 ZIP 源码包（彻底免 Git 认证）
+          # 2. 下载 Passwall 及其依赖包
           mkdir -p package/passwall/luci package/passwall/packages
           
-          # 下载并解压主程序
           wget -q https://github.com/Openwrt-Passwall/openwrt-passwall/archive/refs/heads/main.zip -O luci.zip
           unzip -q luci.zip
           cp -rf openwrt-passwall-main/* package/passwall/luci/
           rm -rf luci.zip openwrt-passwall-main
 
-          # 下载并解压核心依赖组件包
           wget -q https://github.com/Openwrt-Passwall/openwrt-passwall-packages/archive/refs/heads/main.zip -O packages.zip
           unzip -q packages.zip
           cp -rf openwrt-passwall-packages-main/* package/passwall/packages/
           rm -rf packages.zip openwrt-passwall-packages-main
 
-          # 3. 启用 Passwall 配置（显式关闭 Rust 相关默认组件，防止触发 Rust 编译）
+          # 3. 关键步骤：物理删除依赖 Rust 的源码目录，阻断 SDK 扫描 Rust 工具链
+          rm -rf package/passwall/packages/shadowsocks-rust
+          rm -rf package/passwall/packages/tuic-client
+          rm -rf feeds/packages/lang/rust
+
+          # 4. 启用 Passwall 配置
           echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-passwall_include_sing_box=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-passwall_include_xray=y" >> .config
           echo "CONFIG_PACKAGE_chinadns-ng=y" >> .config
 
-          # 关键：显式禁用 Passwall 默认勾选的 Rust 组件
-          echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust=n" >> .config
-          echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Tuic=n" >> .config
-          echo "CONFIG_PACKAGE_shadowsocks-rust=n" >> .config
-          echo "CONFIG_PACKAGE_tuic-client=n" >> .config
-
           make defconfig
 
-          # 4. 开始单独编译 passwall
+          # 5. 开始编译
           make package/luci-app-passwall/compile V=99
 
       - name: Organize IPK Files
