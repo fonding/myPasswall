@@ -27,6 +27,7 @@ jobs:
           # 注意：这里以 ImmortalWrt 24.10 的 aarch64 SDK 为例（如果官方有对应的 snapshot SDK 链接可替换）
           # 也可以替换为你当前固件源码配套的 SDK 压缩包直链
           # SDK_URL="https://downloads.immortalwrt.org/snapshots/targets/mediatek/filogic/immortalwrt-sdk-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.xz"
+          # SDK_URL="https://downloads.immortalwrt.org/releases/24.10-SNAPSHOT/targets/mediatek/filogic/immortalwrt-sdk-24.10-SNAPSHOT-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/mediatek/filogic/immortalwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           wget -q $SDK_URL -O sdk.tar.zst
           tar -xf sdk.tar.zst
