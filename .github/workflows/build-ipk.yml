@@ -37,8 +37,8 @@ jobs:
 
           # 2. 拉取 Passwall 源码及其依赖
           mkdir -p package/passwall
-          git clone https://github.com/xiaorouji/openwrt-passwall.git package/passwall/luci
-          git clone https://github.com/xiaorouji/openwrt-passwall-packages.git package/passwall/packages
+          git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall.git package/passwall/luci
+          git clone --depth=1 https://github.com/xiaorouji/openwrt-passwall-packages.git package/passwall/packages
 
           # 3. 启用 Passwall 配置
           echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
