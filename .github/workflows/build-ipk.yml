@@ -1,4 +1,5 @@
 name: Build Passwall IPK
+
 on:
   workflow_dispatch:
     inputs:
@@ -22,11 +23,14 @@ on:
         description: '编译 shadowsocks-rust（需要在 SDK 内编译 Rust 工具链，非常慢）'
         type: boolean
         default: false
+
 permissions:
   contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
 env:
   TZ: Asia/Shanghai
   SDK_BASE_URL: ${{ inputs.sdk_base_url }}
@@ -34,13 +38,16 @@ env:
   PASSWALL_LUCI_REF: ${{ inputs.passwall_luci_ref }}
   PASSWALL_PACKAGES_REF: ${{ inputs.passwall_packages_ref }}
   INCLUDE_RUST: ${{ inputs.include_rust }}
+
 defaults:
   run:
     shell: bash
+
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+
     steps:
       - name: Free disk space
         run: |
@@ -48,6 +55,7 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           sudo docker image prune --all --force >/dev/null 2>&1 || true
           df -h /
+
       - name: Install build dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -57,6 +65,7 @@ jobs:
             build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
             gettext git libncurses-dev libssl-dev libelf-dev python3 python3-setuptools \
             rsync swig unzip zlib1g-dev file wget curl zstd xz-utils ccache
+
       - name: Resolve SDK file name
         id: sdk
         run: |
@@ -72,6 +81,7 @@ jobs:
           echo "file=$file" >> "$GITHUB_OUTPUT"
           echo "url=$base/$file" >> "$GITHUB_OUTPUT"
           echo "sha256=${line%% *}" >> "$GITHUB_OUTPUT"
+
       - name: Download and extract SDK
         env:
           SDK_FILE: ${{ steps.sdk.outputs.file }}
@@ -83,6 +93,7 @@ jobs:
           mkdir -p sdk
           tar -xf "$SDK_FILE" -C sdk --strip-components=1
           rm -f "$SDK_FILE"
+
       - name: Restore download cache
         uses: actions/cache@v4
         with:
@@ -91,6 +102,7 @@ jobs:
           restore-keys: |
             dl-${{ steps.sdk.outputs.sha256 }}-
             dl-
+
       - name: Setup feeds
         working-directory: sdk
         run: |
@@ -99,19 +111,23 @@ jobs:
           sed -i "1i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;${PASSWALL_LUCI_REF}" feeds.conf.default
           sed -i "1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;${PASSWALL_PACKAGES_REF}" feeds.conf.default
           cat feeds.conf.default
+
           for i in 1 2 3; do
             ./scripts/feeds update -a && break
             [ "$i" = 3 ] && exit 1
             echo "feeds update failed, retry $i ..."; sleep 15
           done
+
           # SDK 自带的 Go 版本过旧，xray-core / sing-box 需要新版 Go
           rm -rf feeds/packages/lang/golang
           git clone --depth 1 -b "$GOLANG_BRANCH" https://github.com/sbwml/packages_lang_golang feeds/packages/lang/golang
           grep -E '^GO_VERSION_(MAJOR_MINOR|PATCH)' feeds/packages/lang/golang/golang/Makefile
           ./scripts/feeds update -i packages
+
           ./scripts/feeds install -a -f -p passwall_packages
           ./scripts/feeds install -a -f -p passwall_luci
           ./scripts/feeds install -a
+
       - name: Generate .config
         working-directory: sdk
         run: |
@@ -134,9 +150,78 @@ jobs:
           ${P}_INCLUDE_ShadowsocksR_Libev_Client=y
           EOF
           sed -i 's/^[[:space:]]*//' .config
+
           if [ "$INCLUDE_RUST" = "true" ]; then
             echo "${P}_INCLUDE_Shadowsocks_Rust_Client=y" >> .config
           else
             echo "# ${P}_INCLUDE_Shadowsocks_Rust_Client is not set" >> .config
             echo "# ${P}_INCLUDE_Shadowsocks_Rust_Server is not set" >> .config
           fi
+
+          make defconfig
+
+          echo "---- passwall related config ----"
+          grep -E 'passwall|xray|sing-box|shadowsocks-rust|golang' .config || true
+
+          for sym in "${P}" CONFIG_PACKAGE_xray-core CONFIG_PACKAGE_sing-box; do
+            grep -qE "^${sym}=[my]$" .config || { echo "::error::${sym} 未被启用，请检查 feeds"; exit 1; }
+          done
+
+      - name: Download sources
+        working-directory: sdk
+        run: |
+          make download -j8 || make download -j1 V=s
+
+      - name: Compile packages
+        working-directory: sdk
+        run: |
+          echo "Using $(nproc) threads"
+          if ! make package/compile -j"$(nproc)" 2>&1 | tee build.log; then
+            echo "::warning::并行编译失败，使用 -j1 V=s 重试以输出详细日志"
+            make package/compile -j1 V=s 2>&1 | tee build-verbose.log
+          fi
+
+      - name: Collect packages
+        run: |
+          mkdir -p out/passwall out/all
+          find sdk/bin/packages -type f \( -name '*.ipk' -o -name '*.apk' \) -exec cp -t out/all {} +
+          find sdk/bin/packages -type f \( -name '*.ipk' -o -name '*.apk' \) \
+            -path '*/passwall_*/*' -exec cp -t out/passwall {} +
+
+          ls -lh out/passwall
+          if ! compgen -G 'out/passwall/luci-app-passwall*' >/dev/null; then
+            echo "::error::没有生成 luci-app-passwall 安装包"
+            exit 1
+          fi
+
+          {
+            echo "### Passwall packages"
+            echo '```'
+            ls -1 out/passwall
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload passwall packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: passwall-ipks
+          path: out/passwall/
+          if-no-files-found: error
+
+      - name: Upload all packages (incl. dependencies)
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-ipks
+          path: out/all/
+          if-no-files-found: warn
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            sdk/build*.log
+            sdk/logs/
+            sdk/.config
+          if-no-files-found: ignore
