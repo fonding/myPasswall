@@ -95,7 +95,7 @@ jobs:
           rm -f "$SDK_FILE"
 
       - name: Restore download cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: sdk/dl
           key: dl-${{ steps.sdk.outputs.sha256 }}-${{ github.run_id }}
@@ -167,18 +167,36 @@ jobs:
             grep -qE "^${sym}=[my]$" .config || { echo "::error::${sym} 未被启用，请检查 feeds"; exit 1; }
           done
 
-      - name: Download sources
-        working-directory: sdk
-        run: |
-          make download -j8 || make download -j1 V=s
-
       - name: Compile packages
         working-directory: sdk
         run: |
+          # 不能用 make package/compile：它会编译 SDK 默认启用的全部基础包（内核头、固件等），
+          # 这些包与 SDK 快照经常不匹配而失败。这里只编译 passwall 源中已启用的包，依赖会自动带上。
+          mapfile -t TARGETS < <(
+            awk '
+              /^Source-Makefile: / {
+                dir = ""
+                if (match($2, /feeds\/passwall_(packages|luci)\/[^\/]+/)) dir = substr($2, RSTART + 6, RLENGTH - 6)
+                next
+              }
+              /^Package: / && dir != "" { print dir, $2 }
+            ' tmp/.packageinfo |
+            while read -r dir pkg; do
+              if grep -qxF "CONFIG_PACKAGE_${pkg}=m" .config || grep -qxF "CONFIG_PACKAGE_${pkg}=y" .config; then
+                echo "package/feeds/${dir}/compile"
+              fi
+            done | sort -u
+          )
+          if [ "${#TARGETS[@]}" -eq 0 ]; then
+            echo "::error::没有找到需要编译的 passwall 包"
+            exit 1
+          fi
+          printf '%s\n' "${TARGETS[@]}"
+
           echo "Using $(nproc) threads"
-          if ! make package/compile -j"$(nproc)" 2>&1 | tee build.log; then
+          if ! make -j"$(nproc)" "${TARGETS[@]}" 2>&1 | tee build.log; then
             echo "::warning::并行编译失败，使用 -j1 V=s 重试以输出详细日志"
-            make package/compile -j1 V=s 2>&1 | tee build-verbose.log
+            make -j1 V=s "${TARGETS[@]}" 2>&1 | tee build-verbose.log
           fi
 
       - name: Collect packages
@@ -202,14 +220,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload passwall packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: passwall-ipks
           path: out/passwall/
           if-no-files-found: error
 
       - name: Upload all packages (incl. dependencies)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: all-ipks
           path: out/all/
@@ -217,7 +235,7 @@ jobs:
 
       - name: Upload build logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-logs
           path: |
