@@ -8,13 +8,21 @@ on:
         required: true
         default: 'openwrt-25.12'
       ubi_size:
-        description: 'ubi 分区大小（512MB NAND = 0x1fa80000；原厂 128MB = 0x7a80000）'
+        description: >-
+          ubi 分区大小（十六进制）。512MB 闪存 = 0x1fa80000，原厂 128MB = 0x7a80000。
+          刷机前请 SSH 到路由器逐条核对：
+          ① dmesg | grep -iE "spi-nand|nand" → 应显示 512 MiB（不是 128 MiB）；
+          ② cat /proc/cmdline → 若含 mtdparts=，其中 (ubi) 应一直到闪存末尾（写作 -(ubi) 或大小 0x1fa80000），这是 U-Boot 的分区视角；
+          ③ cat /proc/mtd → "ubi" 行第 2 列应为 1fa80000；
+          ④ ubinfo -a → Amount of physical eraseblocks 应约为 4052（128MB 布局约为 980）。
+          ③④ 若显示 7a80000 / 约 980，只说明当前固件按 128MB 分区，不代表 U-Boot 不支持，需以 ①② 为准。
+          最可靠是串口进 U-Boot 执行 mtd list，ubi 分区应到 0x20000000 结束。① 或 ② 或串口结果对不上请勿刷机。
         required: true
         default: '0x1fa80000'
       lan_ip:
         description: '默认 LAN IP'
         required: true
-        default: '192.168.1.1'
+        default: '192.168.2.1'
       golang_branch:
         description: 'sbwml/packages_lang_golang 分支'
         required: true
