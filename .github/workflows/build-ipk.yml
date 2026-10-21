@@ -1,85 +1,143 @@
-name: Build Passwall IPK
-
-on:
-  workflow_dispatch: # 允许手动触发
-
-jobs:
-  build:
-  # N60 Pro 是 aarch64 架构，建议在 ubuntu 22.04 环境下编译
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Initialization Environment
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev libelf-dev python3 python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget curl zstd xz-utils ccache
+      - name: Resolve SDK file name
+        id: sdk
+        run: |
+          base="${SDK_BASE_URL%/}"
+          curl -fsSL --retry 5 --retry-delay 5 "$base/sha256sums" -o sha256sums
+          line=$(grep -m1 -E '\*[^ ]*-sdk-[^ ]*\.Linux-x86_64\.tar\.(zst|xz)$' sha256sums || true)
+          if [ -z "$line" ]; then
+            echo "::error::在 $base/sha256sums 中找不到 SDK 文件"
+            exit 1
+          fi
+          file="${line##*\*}"
+          echo "SDK file: $file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "url=$base/$file" >> "$GITHUB_OUTPUT"
+          echo "sha256=${line%% *}" >> "$GITHUB_OUTPUT"
+      - name: Download and extract SDK
         env:
-          DEBIAN_FRONTEND: noninteractive
+          SDK_FILE: ${{ steps.sdk.outputs.file }}
+          SDK_URL: ${{ steps.sdk.outputs.url }}
+          SDK_SHA256: ${{ steps.sdk.outputs.sha256 }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev patch python3 python3-pip rsync subversion unzip zlib1g-dev libelf-dev swig flex bison cmake g++ wget
-          sudo timedatectl set-timezone "Asia/Shanghai"
-          
-      - name: Download and Extract SDK
+          wget -nv --tries=5 --waitretry=10 --retry-connrefused "$SDK_URL" -O "$SDK_FILE"
+          echo "$SDK_SHA256  $SDK_FILE" | sha256sum -c -
+          mkdir -p sdk
+          tar -xf "$SDK_FILE" -C sdk --strip-components=1
+          rm -f "$SDK_FILE"
+      - name: Restore download cache
+        uses: actions/cache@v4
+        with:
+          path: sdk/dl
+          key: dl-${{ steps.sdk.outputs.sha256 }}-${{ github.run_id }}
+          restore-keys: |
+            dl-${{ steps.sdk.outputs.sha256 }}-
+            dl-
+      - name: Setup feeds
+        working-directory: sdk
         run: |
-          # 注意：这里以 ImmortalWrt 24.10 的 aarch64 SDK 为例（如果官方有对应的 snapshot SDK 链接可替换）
-          # 也可以替换为你当前固件源码配套的 SDK 压缩包直链
-          # SDK_URL="https://downloads.immortalwrt.org/snapshots/targets/mediatek/filogic/immortalwrt-sdk-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.xz"
-          SDK_URL="https://downloads.immortalwrt.org/releases/24.10-SNAPSHOT/targets/mediatek/filogic/immortalwrt-sdk-24.10-SNAPSHOT-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          # SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/mediatek/filogic/immortalwrt-sdk-24.10.0-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          wget -q $SDK_URL -O sdk.tar.zst
-          tar -xf sdk.tar.zst
-          mv immortalwrt-sdk-* sdk
-          cd sdk
-
-          # 1. 准备 feeds
-          ./scripts/feeds update -a
+          # passwall 源放在最前面，优先级高于官方 packages 源中的同名包（xray-core、sing-box 等）
+          sed -i '/passwall/d' feeds.conf.default
+          sed -i "1i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;${PASSWALL_LUCI_REF}" feeds.conf.default
+          sed -i "1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;${PASSWALL_PACKAGES_REF}" feeds.conf.default
+          cat feeds.conf.default
+          for i in 1 2 3; do
+            ./scripts/feeds update -a && break
+            [ "$i" = 3 ] && exit 1
+            echo "feeds update failed, retry $i ..."; sleep 15
+          done
+          # SDK 自带的 Go 版本过旧，xray-core / sing-box 需要新版 Go
+          rm -rf feeds/packages/lang/golang
+          git clone --depth 1 -b "$GOLANG_BRANCH" https://github.com/sbwml/packages_lang_golang feeds/packages/lang/golang
+          grep -E '^GO_VERSION_(MAJOR_MINOR|PATCH)' feeds/packages/lang/golang/golang/Makefile
+          ./scripts/feeds update -i packages
+          ./scripts/feeds install -a -f -p passwall_packages
+          ./scripts/feeds install -a -f -p passwall_luci
           ./scripts/feeds install -a
-
-          # 2. 下载 Passwall 及其依赖包
-          mkdir -p package/passwall/luci package/passwall/packages
-
-          wget -q https://github.com/Openwrt-Passwall/openwrt-passwall/archive/refs/heads/main.zip -O luci.zip
-          unzip -q luci.zip
-          cp -rf openwrt-passwall-main/* package/passwall/luci/
-          rm -rf luci.zip openwrt-passwall-main
-
-          wget -q https://github.com/Openwrt-Passwall/openwrt-passwall-packages/archive/refs/heads/main.zip -O packages.zip
-          unzip -q packages.zip
-          cp -rf openwrt-passwall-packages-main/* package/passwall/packages/
-          rm -rf packages.zip openwrt-passwall-packages-main
-
-          # 3. 彻底清除 feeds 和 package 里的 shadowsocks-rust 与 tuic 目录（保留 lang/rust 结构）
-          rm -rf feeds/packages/net/shadowsocks-rust
-          rm -rf feeds/packages/net/tuic-client
-          rm -rf package/passwall/packages/shadowsocks-rust
-          rm -rf package/passwall/packages/tuic-client
-
-          # 4. 显式禁用 Rust 相关子组件
-          echo "CONFIG_PACKAGE_luci-app-passwall=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-passwall_include_sing_box=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-passwall_include_xray=y" >> .config
-          echo "CONFIG_PACKAGE_chinadns-ng=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust=n" >> .config
-          echo "CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Tuic=n" >> .config
-          echo "CONFIG_PACKAGE_shadowsocks-rust=n" >> .config
-          echo "CONFIG_PACKAGE_tuic-client=n" >> .config
-
-          make defconfig
-
-          # 5. 开始单独编译 passwall
-          make package/luci-app-passwall/compile V=99
-
-      - name: Organize IPK Files
+      - name: Generate .config
+        working-directory: sdk
         run: |
-          mkdir -p compiled_ipks
-          # 将编译好的 ipk 收集到指定目录
-          find sdk/bin/packages/ -name "*.ipk" -exec cp {} compiled_ipks/ \;
-
-      - name: Upload Artifacts
+          P=CONFIG_PACKAGE_luci-app-passwall
+          cat > .config <<EOF
+          # CONFIG_ALL is not set
+          # CONFIG_ALL_NONSHARED is not set
+          # CONFIG_ALL_KMODS is not set
+          # CONFIG_AUTOREMOVE is not set
+          # CONFIG_SIGNED_PACKAGES is not set
+          CONFIG_LUCI_LANG_zh_Hans=y
+          ${P}=m
+          ${P}_Nftables_Transparent_Proxy=y
+          ${P}_INCLUDE_Xray=y
+          ${P}_INCLUDE_SingBox=y
+          ${P}_INCLUDE_Geoview=y
+          ${P}_INCLUDE_Haproxy=y
+          ${P}_INCLUDE_Simple_Obfs=y
+          ${P}_INCLUDE_V2ray_Plugin=y
+          ${P}_INCLUDE_ShadowsocksR_Libev_Client=y
+          EOF
+          sed -i 's/^[[:space:]]*//' .config
+          if [ "$INCLUDE_RUST" = "true" ]; then
+            echo "${P}_INCLUDE_Shadowsocks_Rust_Client=y" >> .config
+          else
+            echo "# ${P}_INCLUDE_Shadowsocks_Rust_Client is not set" >> .config
+            echo "# ${P}_INCLUDE_Shadowsocks_Rust_Server is not set" >> .config
+          fi
+          make defconfig
+          echo "---- passwall related config ----"
+          grep -E 'passwall|xray|sing-box|shadowsocks-rust|golang' .config || true
+          for sym in "${P}" CONFIG_PACKAGE_xray-core CONFIG_PACKAGE_sing-box; do
+            grep -qE "^${sym}=[my]$" .config || { echo "::error::${sym} 未被启用，请检查 feeds"; exit 1; }
+          done
+      - name: Download sources
+        working-directory: sdk
+        run: |
+          make download -j8 || make download -j1 V=s
+      - name: Compile packages
+        working-directory: sdk
+        run: |
+          echo "Using $(nproc) threads"
+          if ! make package/compile -j"$(nproc)" 2>&1 | tee build.log; then
+            echo "::warning::并行编译失败，使用 -j1 V=s 重试以输出详细日志"
+            make package/compile -j1 V=s 2>&1 | tee build-verbose.log
+          fi
+      - name: Collect packages
+        run: |
+          mkdir -p out/passwall out/all
+          find sdk/bin/packages -type f \( -name '*.ipk' -o -name '*.apk' \) -exec cp -t out/all {} +
+          find sdk/bin/packages -type f \( -name '*.ipk' -o -name '*.apk' \) \
+            -path '*/passwall_*/*' -exec cp -t out/passwall {} +
+          ls -lh out/passwall
+          if ! compgen -G 'out/passwall/luci-app-passwall*' >/dev/null; then
+            echo "::error::没有生成 luci-app-passwall 安装包"
+            exit 1
+          fi
+          {
+            echo "### Passwall packages"
+            echo '```'
+            ls -1 out/passwall
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload passwall packages
         uses: actions/upload-artifact@v4
         with:
           name: passwall-ipks
-          path: compiled_ipks/*.ipk
+          path: out/passwall/
+          if-no-files-found: error
+      - name: Upload all packages (incl. dependencies)
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-ipks
+          path: out/all/
+          if-no-files-found: warn
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            sdk/build*.log
+            sdk/logs/
+            sdk/.config
+          if-no-files-found: ignore
