@@ -27,7 +27,25 @@ rm -rf package/mosdns/v2ray-geodata
 ./scripts/feeds install -a -f -p passwall_luci
 ./scripts/feeds install -a
 
-# ---- Enlarge UBI to cover the whole 512 MiB NAND ----
+# ---- 512 MiB NAND mod: geometry, UBI size, accept the vendor 512m board name ----
+mk=target/linux/mediatek/image/filogic.mk
+grep -q '^define Device/netcore_n60-pro$' "$mk" || {
+  echo "::error::Device/netcore_n60-pro not found in $mk"
+  exit 1
+}
+sed -i '/^define Device\/netcore_n60-pro$/,/^endef/{
+  s/BLOCKSIZE := 128k/BLOCKSIZE := 256k/
+  s/PAGESIZE := 2048/PAGESIZE := 4096/
+  /DEVICE_MODEL := N60 Pro/a\  SUPPORTED_DEVICES += netcore,n60-pro-512m
+}' "$mk"
+echo "---- patched device definition ----"
+sed -n '/^define Device\/netcore_n60-pro$/,/^endef/p' "$mk"
+block=$(sed -n '/^define Device\/netcore_n60-pro$/,/^endef/p' "$mk")
+for want in 'netcore,n60-pro-512m' 'BLOCKSIZE := 256k' 'PAGESIZE := 4096'; do
+  grep -qF "$want" <<<"$block" || { echo "::error::failed to patch $mk ($want)"; exit 1; }
+done
+
+# The ubi size must match U-Boot's mtdparts, otherwise U-Boot cannot see every PEB
 dts=target/linux/mediatek/dts/mt7986a-netcore-n60-pro.dts
 grep -q 'reg = <0x0580000 0x7a80000>;' "$dts" || {
   echo "::error::ubi partition definition not found in $dts, upstream DTS changed"

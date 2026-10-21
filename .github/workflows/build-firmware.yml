@@ -9,16 +9,15 @@ on:
         default: 'openwrt-25.12'
       ubi_size:
         description: >-
-          ubi 分区大小（十六进制）。512MB 闪存 = 0x1fa80000，原厂 128MB = 0x7a80000。
-          刷机前请 SSH 到路由器逐条核对：
-          ① dmesg | grep -iE "spi-nand|nand" → 应显示 512 MiB（不是 128 MiB）；
-          ② cat /proc/cmdline → 若含 mtdparts=，其中 (ubi) 应一直到闪存末尾（写作 -(ubi) 或大小 0x1fa80000），这是 U-Boot 的分区视角；
-          ③ cat /proc/mtd → "ubi" 行第 2 列应为 1fa80000；
-          ④ ubinfo -a → Amount of physical eraseblocks 应约为 4052（128MB 布局约为 980）。
-          ③④ 若显示 7a80000 / 约 980，只说明当前固件按 128MB 分区，不代表 U-Boot 不支持，需以 ①② 为准。
-          最可靠是串口进 U-Boot 执行 mtd list，ubi 分区应到 0x20000000 结束。① 或 ② 或串口结果对不上请勿刷机。
+          ubi 分区大小（十六进制），必须与 U-Boot 的 mtdparts 中 ubi 的大小完全一致。
+          常见值：500m = 0x1f400000（本机 WildEdition U-Boot），到闪存末尾 = 0x1fa80000，原厂 128MB = 0x7a80000。
+          刷机前请 SSH 到路由器核对：
+          ① tr '\0' '\n' < /dev/mtd1 | grep mtdparts → 读 U-Boot 环境变量，(ubi) 前面的大小就是要填的值（500m = 0x1f400000）；
+          ② dmesg | grep -iE "spi-nand|nand" → 应显示 512 MiB, block size: 256 KiB；
+          ③ cat /proc/mtd → "ubi" 行第 2 列是当前固件的分区大小，仅供参考，以 ① 为准。
+          ① 中没有 mtdparts 时，请串口进 U-Boot 执行 mtd list 查看 ubi 大小。
         required: true
-        default: '0x1fa80000'
+        default: '0x1f400000'
       lan_ip:
         description: '默认 LAN IP'
         required: true
@@ -81,7 +80,14 @@ jobs:
           [[ "$LAN_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "::error::lan_ip 格式错误"; exit 1; }
           end=$(( 0x580000 + UBI_SIZE ))
           (( end <= 0x20000000 )) || { echo "::error::ubi 分区超出 512MB 闪存范围"; exit 1; }
-          printf 'ubi: 0x580000 - 0x%x (%d MiB)\n' "$end" $(( UBI_SIZE / 1048576 ))
+          printf 'ubi: 0x580000 - 0x%x (%d KiB)\n' "$end" $(( UBI_SIZE / 1024 ))
+          case "$(printf '0x%x' "$UBI_SIZE")" in
+            0x1f400000|0x1fa80000) label=512mb ;;
+            0x7a80000) label=128mb ;;
+            *) label="ubi$(printf '0x%x' "$UBI_SIZE")" ;;
+          esac
+          echo "FLASH_LABEL=$label" >> "$GITHUB_ENV"
+          echo "Flash label: $label"
 
       - name: Free disk space
         run: |
@@ -209,17 +215,21 @@ jobs:
           src=$(find openwrt/bin/targets -type d -name filogic | head -1)
           mkdir -p out
           cp "$src"/*netcore_n60-pro* out/
-          cp openwrt/.config out/config.buildinfo
-          [ -f "$src/sha256sums" ] && cp "$src/sha256sums" out/
           rm -f out/*bl31-uboot.fip out/*preloader.bin
+          for f in out/*netcore_n60-pro*; do
+            mv "$f" "${f/netcore_n60-pro/netcore_n60-pro-$FLASH_LABEL}"
+          done
+          cp openwrt/.config out/config.buildinfo
+          (cd out && sha256sum -- *netcore_n60-pro* > sha256sums)
           ls -lh out
           compgen -G 'out/*sysupgrade.itb' >/dev/null || { echo "::error::没有生成 sysupgrade 固件"; exit 1; }
 
-          tag="n60pro-$(date +%Y%m%d-%H%M)"
+          tag="n60pro-$FLASH_LABEL-$(date +%Y%m%d-%H%M)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           {
             echo "### N60 Pro firmware ($REPO_BRANCH @ $SRC_COMMIT)"
-            echo "- ubi: 0x580000 + $UBI_SIZE"
+            echo "- ubi: 0x580000 + $UBI_SIZE ($FLASH_LABEL)"
+            echo "- board: netcore,n60-pro (also accepts netcore,n60-pro-512m)"
             echo "- LAN IP: $LAN_IP"
             echo '```'
             ls -1 out
