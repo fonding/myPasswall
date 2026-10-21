@@ -1,0 +1,246 @@
+name: Build N60 Pro Firmware (512MB NAND)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_branch:
+        description: 'ImmortalWrt 分支（openwrt-25.12 = 最新稳定版，master = 开发版）'
+        required: true
+        default: 'openwrt-25.12'
+      ubi_size:
+        description: 'ubi 分区大小（512MB NAND = 0x1fa80000；原厂 128MB = 0x7a80000）'
+        required: true
+        default: '0x1fa80000'
+      lan_ip:
+        description: '默认 LAN IP'
+        required: true
+        default: '192.168.1.1'
+      golang_branch:
+        description: 'sbwml/packages_lang_golang 分支'
+        required: true
+        default: '27.x'
+      passwall_luci_ref:
+        description: 'openwrt-passwall 分支 / tag'
+        required: true
+        default: 'main'
+      passwall_packages_ref:
+        description: 'openwrt-passwall-packages 分支 / tag'
+        required: true
+        default: 'main'
+      include_rust:
+        description: '包含 shadowsocks-rust（可能需要编译 Rust 工具链，耗时较长）'
+        type: boolean
+        default: false
+      release:
+        description: '编译成功后发布到 GitHub Releases'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Shanghai
+  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
+  REPO_BRANCH: ${{ inputs.repo_branch }}
+  UBI_SIZE: ${{ inputs.ubi_size }}
+  LAN_IP: ${{ inputs.lan_ip }}
+  GOLANG_BRANCH: ${{ inputs.golang_branch }}
+  PASSWALL_LUCI_REF: ${{ inputs.passwall_luci_ref }}
+  PASSWALL_PACKAGES_REF: ${{ inputs.passwall_packages_ref }}
+  INCLUDE_RUST: ${{ inputs.include_rust }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          [[ "$UBI_SIZE" =~ ^0x[0-9a-fA-F]+$ ]] || { echo "::error::ubi_size 必须是十六进制，例如 0x1fa80000"; exit 1; }
+          [[ "$LAN_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "::error::lan_ip 格式错误"; exit 1; }
+          end=$(( 0x580000 + UBI_SIZE ))
+          (( end <= 0x20000000 )) || { echo "::error::ubi 分区超出 512MB 闪存范围"; exit 1; }
+          printf 'ubi: 0x580000 - 0x%x (%d MiB)\n' "$end" $(( UBI_SIZE / 1048576 ))
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/microsoft \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/local/share/powershell \
+            /usr/local/share/chromium /usr/local/lib/node_modules "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          sudo swapoff -a && sudo rm -f /mnt/swapfile /swapfile || true
+          df -h / /mnt
+
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev libelf-dev python3 python3-dev \
+            python3-setuptools python3-pyelftools rsync swig unzip zlib1g-dev file \
+            wget curl zstd xz-utils ccache quilt libfuse-dev
+          sudo apt-get clean
+
+      - name: Prepare work directory
+        run: |
+          # /mnt is the larger disk on GitHub-hosted runners
+          if [ "$(df --output=avail -B1G /mnt | tail -1)" -gt "$(df --output=avail -B1G / | tail -1)" ]; then
+            base=/mnt
+          else
+            base=$HOME
+          fi
+          sudo mkdir -p "$base/openwrt"
+          sudo chown "$USER:$(id -gn)" "$base/openwrt"
+          ln -sfn "$base/openwrt" "$GITHUB_WORKSPACE/openwrt"
+          echo "Work dir: $base/openwrt"
+
+      - name: Clone source
+        run: |
+          git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" openwrt/
+          cd openwrt
+          echo "SRC_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          git log -1 --format='%h %s (%cd)'
+
+      - name: Setup feeds
+        working-directory: openwrt
+        run: |
+          sed -i '/passwall/d' feeds.conf.default
+          sed -i "1i src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;${PASSWALL_LUCI_REF}" feeds.conf.default
+          sed -i "1i src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;${PASSWALL_PACKAGES_REF}" feeds.conf.default
+          cat feeds.conf.default
+
+          for i in 1 2 3; do
+            ./scripts/feeds update -a && break
+            [ "$i" = 3 ] && exit 1
+            echo "feeds update failed, retry $i ..."; sleep 15
+          done
+
+          bash "$GITHUB_WORKSPACE/firmware/prepare.sh"
+
+      - name: Add custom files
+        run: |
+          cp -r firmware/files openwrt/files
+          cat > openwrt/files/etc/uci-defaults/98-lan-ip <<EOF
+          #!/bin/sh
+          uci -q set network.lan.ipaddr='${LAN_IP}'
+          uci commit network
+          exit 0
+          EOF
+          sed -i 's/^[[:space:]]*//' openwrt/files/etc/uci-defaults/98-lan-ip
+          chmod +x openwrt/files/etc/uci-defaults/*
+
+      - name: Generate .config
+        working-directory: openwrt
+        run: |
+          cp "$GITHUB_WORKSPACE/firmware/n60pro.config" .config
+          P=CONFIG_PACKAGE_luci-app-passwall
+          if [ "$INCLUDE_RUST" = "true" ]; then
+            echo "${P}_INCLUDE_Shadowsocks_Rust_Client=y" >> .config
+          else
+            echo "# ${P}_INCLUDE_Shadowsocks_Rust_Client is not set" >> .config
+          fi
+          make defconfig
+
+          missing=0
+          for sym in TARGET_mediatek_filogic_DEVICE_netcore_n60-pro \
+                     PACKAGE_luci-app-passwall PACKAGE_xray-core PACKAGE_sing-box PACKAGE_hysteria \
+                     PACKAGE_luci-app-adguardhome PACKAGE_adguardhome \
+                     PACKAGE_luci-app-mosdns PACKAGE_mosdns; do
+            if ! grep -q "^CONFIG_${sym}=y" .config; then
+              echo "::error::CONFIG_${sym} 未被启用"; missing=1
+            fi
+          done
+          # report seed entries that defconfig silently dropped
+          grep -E '^CONFIG_[^=]+=y' "$GITHUB_WORKSPACE/firmware/n60pro.config" | while read -r line; do
+            grep -qxF "$line" .config || echo "::warning::${line} 未生效（包不存在或依赖不满足）"
+          done
+          [ "$missing" = 0 ]
+
+      - name: Restore download cache
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: dl-${{ inputs.repo_branch }}-${{ github.run_id }}
+          restore-keys: |
+            dl-${{ inputs.repo_branch }}-
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          make download -j8 || make download -j1 V=s
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile firmware
+        working-directory: openwrt
+        run: |
+          echo "Using $(nproc) threads"
+          if ! make -j"$(($(nproc) + 1))" 2>&1 | tee build.log; then
+            echo "::warning::并行编译失败，使用 -j1 V=s 重试以输出详细日志"
+            make -j1 V=s 2>&1 | tee build-verbose.log
+          fi
+          df -h .
+
+      - name: Collect firmware
+        id: collect
+        run: |
+          src=$(find openwrt/bin/targets -type d -name filogic | head -1)
+          mkdir -p out
+          cp "$src"/*netcore_n60-pro* out/
+          cp openwrt/.config out/config.buildinfo
+          [ -f "$src/sha256sums" ] && cp "$src/sha256sums" out/
+          rm -f out/*bl31-uboot.fip out/*preloader.bin
+          ls -lh out
+          compgen -G 'out/*sysupgrade.itb' >/dev/null || { echo "::error::没有生成 sysupgrade 固件"; exit 1; }
+
+          tag="n60pro-$(date +%Y%m%d-%H%M)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "### N60 Pro firmware ($REPO_BRANCH @ $SRC_COMMIT)"
+            echo "- ubi: 0x580000 + $UBI_SIZE"
+            echo "- LAN IP: $LAN_IP"
+            echo '```'
+            ls -1 out
+            echo '```'
+          } | tee release.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: n60pro-firmware-${{ steps.collect.outputs.tag }}
+          path: out/
+          if-no-files-found: error
+
+      - name: Publish release
+        if: inputs.release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.collect.outputs.tag }}
+          name: N60 Pro ${{ steps.collect.outputs.tag }}
+          body_path: release.md
+          files: out/*
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            openwrt/build*.log
+            openwrt/logs/
+            openwrt/.config
+          if-no-files-found: ignore

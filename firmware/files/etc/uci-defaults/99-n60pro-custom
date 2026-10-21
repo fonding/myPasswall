@@ -1,0 +1,23 @@
+#!/bin/sh
+
+# Software + hardware flow offloading (MT7986 PPE)
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+uci commit firewall
+
+# Wireless Ethernet Dispatch: offload Wi-Fi <-> Ethernet forwarding to hardware
+if [ -f /etc/modules.d/mt7915e ] && ! grep -q 'wed_enable' /etc/modules.d/mt7915e; then
+	sed -i 's/^mt7915e$/mt7915e wed_enable=Y/' /etc/modules.d/mt7915e
+fi
+
+# TCP BBR
+cat > /etc/sysctl.d/99-bbr.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+
+uci -q set system.@system[0].zonename='Asia/Shanghai'
+uci -q set system.@system[0].timezone='CST-8'
+uci commit system
+
+exit 0
