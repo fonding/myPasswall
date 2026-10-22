@@ -72,7 +72,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Validate inputs
         run: |
@@ -186,7 +186,7 @@ jobs:
           [ "$missing" = 0 ]
 
       - name: Restore download cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: openwrt/dl
           key: dl-${{ inputs.repo_branch }}-${{ github.run_id }}
@@ -197,7 +197,8 @@ jobs:
         working-directory: openwrt
         run: |
           make download -j8 || make download -j1 V=s
-          find dl -size -1024c -exec rm -f {} \;
+          # dl/go-mod-cache holds many legitimately tiny files; only prune truncated top-level tarballs
+          find dl -maxdepth 1 -type f -size -1024c -print -delete
 
       - name: Compile firmware
         working-directory: openwrt
@@ -237,7 +238,7 @@ jobs:
           } | tee release.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload firmware
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: n60pro-firmware-${{ steps.collect.outputs.tag }}
           path: out/
@@ -254,7 +255,7 @@ jobs:
 
       - name: Upload build logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-logs
           path: |
